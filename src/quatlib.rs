@@ -1,180 +1,157 @@
-use super::meta::types::*;
-use super::meta::utils::*;
+use crate::meta::utils::sanitize_dims;
+use crate::types::*;
+use crate::veclib::*;
 
-use ndarray::{concatenate, s, stack, Axis};
+use ndarray::{concatenate, s, stack, Axis, Data};
 
-use super::veclib::*;
-
-// pub fn randq(num: usize) -> Quaternion4 {
-//     let mut randr = rand::rngs::OsRng;
-//     let unif = rand::distributions::Uniform::new(-PI, PI);
-//     let ax = runit(num);
-//     let theta = Generic1D::from_shape_vec(
-//         num,
-//         unif.sample_iter(&mut randr).take(num).collect::<Vec<f64>>(),
-//     )
-//     .unwrap();
-//     let st = (theta.clone() / 2.).sin();
-//     let ct = (theta / 2.).cos();
-//     let q1 = &ax.row(0) * st.clone();
-//     let q2 = &ax.row(1) * st.clone();
-//     let q3 = &ax.row(2) * st;
-//     let q4 = ct;
-
-//     ndarray::stack![Axis(0), q1, q2, q3, q4]
-// }
-
-pub fn qangle(q32: &Quaternion4, q21: &Quaternion4) -> Generic1D {
-    // let (q32, q21) = sanitize_dims(q32, q21);
-    let dq = qcomp(q32, &qinv(q21));
-    let (_, st) = unit(ndarray::stack![Axis(0), dq.row(0), dq.row(1), dq.row(2)]);
-    let st = st.to_vec();
-    let ct = dq.row(3).to_vec();
-
-    Generic1D::from_iter(st.iter().zip(ct.iter()).map(|(&s, &c)| 2.0 * s.atan2(c)))
-}
-
-pub fn qinv(q21: &Quaternion4) -> Quaternion4 {
-    ndarray::stack![
+pub fn qinv<A>(q21: &Quaternion4Slice<A>) -> Quaternion4
+where
+    A: Data<Elem = f64>,
+{
+    stack![
         Axis(0),
-        -1. * &q21.row(0),
-        -1. * &q21.row(1),
-        -1. * &q21.row(2),
-        q21.row(3)
+        q21.row(0).to_owned() * -1.,
+        q21.row(1).to_owned() * -1.,
+        q21.row(2).to_owned() * -1.,
+        q21.row(3).to_owned() * 1.,
     ]
 }
 
-pub fn qcomp(q32: &Quaternion4, q21: &Quaternion4) -> Quaternion4 {
-    let (q31, _) = unit(qmult(q32, q21));
-    q31
-}
-
-pub fn qmult(q32: &Quaternion4, q21: &Quaternion4) -> Quaternion4 {
+pub fn qmult<A>(q32: &Quaternion4Slice<A>, q21: &Quaternion4Slice<A>) -> Quaternion4
+where
+    A: Data<Elem = f64>,
+{
     // Markley 2.84a
-    // let (q32, q21) = sanitize_dims(q32, q21);
-    let n_col = q32.shape()[1];
+    // Sanitize Dimensions
+    let (q32, q21) = sanitize_dims(q32, q21);
 
-    let psi_q32 = psi_q(q32.to_owned());
-    let mut q31 = Quaternion4::zeros((4, n_col));
-    q31.axis_iter_mut(Axis(1))
-        .zip(
-            psi_q32
-                .axis_iter(Axis(2))
-                .zip(q32.axis_iter(Axis(1)).zip(q21.axis_iter(Axis(1)))),
-        )
-        .for_each(|(q_31, (psiq, (q_32, q_21)))| {
-            let qmat = concatenate![Axis(1), psiq, q_32.into_shape_with_order((4, 1)).unwrap()];
-            (qmat.dot(&q_21)).assign_to(q_31);
-        });
-
-    q31
-}
-
-fn mat_q_form(q21: Quaternion4, scl: f64) -> Generic3D {
-    let n_col = q21.shape()[1];
-
-    let qvec = q21.slice(s![0..3, ..]).to_owned();
-    let nqvec = qvec.to_owned() * -1.;
-    let qscl = q21.slice(s![3, ..]);
-
-    let mut psiq = Generic3D::zeros((4, 3, n_col));
-    psiq.slice_mut(s![0, 0, ..]).assign(&qscl);
-    psiq.slice_mut(s![1, 1, ..]).assign(&qscl);
-    psiq.slice_mut(s![2, 2, ..]).assign(&qscl);
-
-    let qvec_skew = scl * skew(qvec).into_shape_with_order((3, 3, n_col)).unwrap();
-
-    qvec_skew
-        .slice(s![1.., 0, ..])
-        .assign_to(psiq.slice_mut(s![1..3, 0, ..]));
-
-    qvec_skew
-        .slice(s![0, 1, ..])
-        .assign_to(psiq.slice_mut(s![0, 1, ..]));
-
-    qvec_skew
-        .slice(s![2, 1, ..])
-        .assign_to(psiq.slice_mut(s![2, 1, ..]));
-
-    qvec_skew
-        .slice(s![0..2, 2, ..])
-        .assign_to(psiq.slice_mut(s![0..2, 2, ..]));
-
-    psiq.slice_mut(s![3, 0, ..]).assign(&nqvec.slice(s![0, ..]));
-    psiq.slice_mut(s![3, 1, ..]).assign(&nqvec.slice(s![1, ..]));
-    psiq.slice_mut(s![3, 2, ..]).assign(&nqvec.slice(s![2, ..]));
-
-    psiq
-}
-
-pub fn psi_q(q21: Quaternion4) -> Generic3D {
-    mat_q_form(q21, -1.)
-}
-
-pub fn xi_q(q21: Quaternion4) -> Generic3D {
-    mat_q_form(q21, 1.)
-}
-
-pub fn qxform(q21: Quaternion4, u1: Vector3) -> Vector3 {
-    let (q21, u1) = sanitize_dims(q21, u1);
-    let (u1u, u1m) = unit(u1);
-    let n_col = u1u.shape()[0];
-
-    let xi_q = xi_q(q21.to_owned());
-    let psi_q = psi_q(q21);
-
-    let mut u2 = Vector3::zeros((3, n_col));
-    u2.axis_iter_mut(Axis(1)).enumerate().for_each(|(ii, u)| {
-        (u1m[ii]
-            * xi_q
-                .slice(s![.., .., ii])
-                .t()
-                .dot(&psi_q.slice(s![.., .., ii]))
-                .dot(&u1u.slice(s![.., ii])))
-        .assign_to(u);
-    });
-
-    u2
-}
-
-pub fn dcm2quat(T21: TransformMatrix33) -> Quaternion4 {
-    let n_col = T21.shape()[2];
-    let t21_tr = Generic1D::from_iter(
-        T21.axis_iter(Axis(2))
-            .map(|T| T[[0, 0]] + T[[1, 1]] + T[[2, 2]]),
+    // Extract Vectors and Scalars
+    let (qv, pv) = (q32.slice(s![0..3, ..]), q21.slice(s![0..3, ..]));
+    let (q4, p4) = (
+        q32.row(3).insert_axis(Axis(0)),
+        q21.row(3).insert_axis(Axis(0)),
     );
 
-    let qA = stack![
-        Axis(1),
-        1. + 2. * T21.slice(s![0, 0, ..]).to_owned() - t21_tr.to_owned(),
-        T21.slice(s![0, 1, ..]).to_owned() + T21.slice(s![1, 0, ..]).to_owned(),
-        T21.slice(s![0, 2, ..]).to_owned() + T21.slice(s![2, 0, ..]).to_owned(),
-        T21.slice(s![1, 2, ..]).to_owned() - T21.slice(s![2, 1, ..]).to_owned()
-    ];
+    // Compute vector portion
+    let qvec = concatenate![Axis(0), q4, q4, q4] * &pv - fcross(&qv, &pv)
+        + concatenate![Axis(0), p4, p4, p4] * &qv;
 
-    let qB = stack![
-        Axis(1),
-        T21.slice(s![1, 0, ..]).to_owned() + T21.slice(s![0, 1, ..]).to_owned(),
-        1. + 2. * T21.slice(s![1, 1, ..]).to_owned() - t21_tr.to_owned(),
-        T21.slice(s![1, 2, ..]).to_owned() + T21.slice(s![2, 1, ..]).to_owned(),
-        T21.slice(s![2, 0, ..]).to_owned() - T21.slice(s![0, 2, ..]).to_owned(),
-    ];
+    // Compute scalar portion
+    let qscl = (qinv(&q32) * &q21).sum_axis(Axis(0)).insert_axis(Axis(0));
 
-    let qC = stack![
-        Axis(1),
-        T21.slice(s![2, 0, ..]).to_owned() + T21.slice(s![0, 2, ..]).to_owned(),
-        T21.slice(s![1, 2, ..]).to_owned() + T21.slice(s![2, 1, ..]).to_owned(),
-        1. + 2. * T21.slice(s![2, 2, ..]).to_owned() - t21_tr.to_owned(),
-        T21.slice(s![0, 1, ..]).to_owned() - T21.slice(s![1, 0, ..]).to_owned(),
-    ];
+    concatenate![Axis(0), qvec, qscl]
+}
 
-    let qD = stack![
-        Axis(1),
-        T21.slice(s![1, 2, ..]).to_owned() - T21.slice(s![2, 1, ..]).to_owned(),
-        T21.slice(s![2, 0, ..]).to_owned() - T21.slice(s![0, 2, ..]).to_owned(),
-        T21.slice(s![0, 1, ..]).to_owned() + T21.slice(s![1, 0, ..]).to_owned(),
-        1. + t21_tr
-    ];
+pub fn qcomp<A>(q32: &Quaternion4Slice<A>, q21: &Quaternion4Slice<A>) -> Quaternion4
+where
+    A: Data<Elem = f64>,
+{
+    let (q31, _) = unit(&qmult(q32, q21));
+    q31
+}
 
-    qA
+pub fn qangle<A>(q32: &Quaternion4Slice<A>, q21: &Quaternion4Slice<A>) -> Scalar
+where
+    A: Data<Elem = f64>,
+{
+    let (q32, q21) = sanitize_dims(q32, q21);
+    let dq = qcomp(&q32, &qinv(&q21));
+    let (_, sintheta) = unit(&dq.slice(s![0..3, ..]));
+    let costheta = dq.slice(s![3, ..]);
+
+    Generic1D::from_iter(
+        sintheta
+            .iter()
+            .zip(costheta.iter())
+            .map(|(&s, &c)| 2.0 * s.atan2(c)),
+    )
+}
+
+pub fn qxform<A>(q21: &Quaternion4Slice<A>, u1: &Vector3Slice<A>) -> Vector3
+where
+    A: Data<Elem = f64>,
+{
+    // Sanitize dimensions
+    let (q21, u1) = sanitize_dims(q21, u1);
+
+    // Markley 2.130
+    let qu1 = concatenate![
+        Axis(0),
+        u1,
+        Generic1D::zeros(u1.shape()[1]).insert_axis(Axis(0))
+    ]; // Create quaternion form of vector [x; 0];
+
+    qcomp(&q21, &qcomp(&qu1, &qinv(&q21))) // u2 = q \otimes u1 \otimes qinv(q)
+        .slice(s![0..3, ..]) // only grab first 3 rows
+        .to_owned()
+}
+
+pub fn qdot<A>(w2: &Vector3Slice<A>, q21: &Quaternion4Slice<A>) -> Quaternion4
+where
+    A: Data<Elem = f64>,
+{
+    let (w2, q21) = sanitize_dims(w2, q21);
+
+    // Markley 3.79d
+    0.5 * qmult(
+        &concatenate![
+            Axis(0),
+            w2,
+            Generic1D::zeros(w2.shape()[1]).insert_axis(Axis(0))
+        ],
+        &q21,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
+
+    fn q_ident(n: usize) -> Generic2D {
+        concatenate![
+            Axis(0),
+            Generic2D::zeros((3, n)),
+            Generic1D::ones(n).insert_axis(Axis(0))
+        ]
+    }
+
+    #[test]
+    fn test_qinv_identity() {
+        let qi = q_ident(1);
+        assert_eq!(qinv(&qi), qi);
+    }
+
+    #[test]
+    fn test_qinv() {
+        let qi = Generic2D::from_shape_vec((4, 1), vec![1., 2., 3., 4.]).unwrap();
+        let true_inv = Generic2D::from_shape_vec((4, 1), vec![-1., -2., -3., 4.]).unwrap();
+        assert_eq!(qinv(&qi), true_inv);
+    }
+
+    #[test]
+    fn test_qmult_zero() {
+        let q_a = q_ident(1);
+        let q_b = q_ident(1);
+        let q_c = q_ident(1);
+
+        assert_eq!(qmult(&q_a, &q_b), q_c);
+    }
+
+    #[test]
+    fn test_qangle_zero() {
+        let q_a = q_ident(1);
+        let q_b = q_ident(1);
+        let q_c = array![0.];
+
+        assert_eq!(qangle(&q_a, &q_b), q_c);
+    }
+
+    #[test]
+    fn test_qdot_zero_rate() {
+        let w = Generic2D::zeros((3, 1));
+        let q21 = q_ident(1);
+
+        assert_eq!(qdot(&w, &q21), Generic2D::zeros((4, 1)))
+    }
 }

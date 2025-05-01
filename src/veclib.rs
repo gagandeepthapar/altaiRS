@@ -1,13 +1,15 @@
-use super::meta::types::*;
-use super::meta::utils::*;
+use crate::meta::utils::*;
 
+use crate::types::*;
 use ndarray::Axis;
-use ndarray::{array, s, stack, Array1, ArrayBase, Data, Ix1};
-use rand::{self, prelude::Distribution};
+use ndarray::{s, stack, Data};
 
-pub fn skew(u1: Vector3) -> Generic3D {
+pub fn skew<A>(u1: &Vector3Slice<A>) -> Generic3D
+where
+    A: Data<Elem = f64>,
+{
     let ncol = u1.shape()[1];
-    let nu1 = &u1 * -1.;
+    let nu1 = u1 * -1.;
 
     let mut skewblock = Generic3D::zeros((3, 3, ncol));
 
@@ -32,15 +34,27 @@ pub fn skew(u1: Vector3) -> Generic3D {
     skewblock
 }
 
-pub fn unit(u1: Generic2D) -> (Generic2D, Generic1D) {
+pub fn unit<A>(u1: &GenericSlice2D<A>) -> (Generic2D, Scalar)
+where
+    A: Data<Elem = f64>,
+{
     let norm = u1.pow2().sum_axis(Axis(0)).sqrt(); // col-wise norm
-    (u1 / norm.clone(), norm)
+    (u1 / &norm, norm)
 }
 
-pub fn sat(val: f64, lims: (f64, f64)) -> f64 {
-    let val = if val < lims.0 { lims.0 } else { val };
-    let val = if lims.1 < val { lims.1 } else { val };
-    val
+pub fn sat<A>(vals: &GenericSlice1D<A>, lims: (f64, f64)) -> Generic1D
+where
+    A: Data<Elem = f64>,
+{
+    Generic1D::from_iter(vals.iter().map(|&v| {
+        if v < lims.0 {
+            lims.0
+        } else if v > lims.1 {
+            lims.1
+        } else {
+            v
+        }
+    }))
 }
 
 pub fn clamp<T>(val: T, lims: (T, T)) -> T
@@ -50,62 +64,111 @@ where
     std::cmp::min(std::cmp::max(val, lims.0), lims.1)
 }
 
-pub fn runit(num: usize) -> Vector3 {
-    let mut randr = rand::rngs::OsRng;
-    let unif = rand::distributions::Uniform::new(-1., 1.);
-    let uz = unif
-        .sample_iter(&mut randr)
-        .take(num * 3)
-        .collect::<Vec<f64>>();
-
-    let (u1, _) = unit(Vector3::from_shape_vec((3, num), uz).unwrap());
-    u1
-}
-
-pub fn fdot(u1: Vector3, u2: Vector3) -> Generic1D {
+pub fn fdot<A>(u1: &Vector3Slice<A>, u2: &Vector3Slice<A>) -> Scalar
+where
+    A: Data<Elem = f64>,
+{
     let (u1, u2) = sanitize_dims(u1, u2);
     (u1 * u2).sum_axis(Axis(0)) // sum(a_i * b_i)
 }
 
-pub fn mfcross<A>(u1: &ArrayBase<A, Ix1>, u2: &ArrayBase<A, Ix1>) -> Array1<f64>
+pub fn fcross<A>(u1: &Vector3Slice<A>, u2: &Vector3Slice<A>) -> Vector3
 where
     A: Data<Elem = f64>,
 {
-    array![
-        u1[1] * u2[2] - u1[2] * u1[1],
-        u1[2] * u2[0] - u1[0] * u2[2],
-        u1[0] * u2[1] - u1[1] * u2[0]
+    let (u1, u2) = sanitize_dims(u1, u2);
+    stack![
+        Axis(0),
+        &u1.row(1) * &u2.row(2) - &u1.row(2) * &u2.row(1),
+        &u1.row(2) * &u2.row(0) - &u1.row(0) * &u2.row(2),
+        &u1.row(0) * &u2.row(1) - &u1.row(1) * &u2.row(0)
     ]
 }
 
-pub fn fcross(u1: &Vector3, u2: &Vector3) -> Vector3 {
-    // let (u1, u2) = sanitize_dims(u1, u2);
-    let x = &u1.row(1) * &u2.row(2) - &u1.row(2) * &u2.row(1);
-    let y = &u1.row(2) * &u2.row(0) - &u1.row(0) * &u2.row(2);
-    let z = &u1.row(0) * &u2.row(1) - &u1.row(1) * &u2.row(0);
-    ndarray::stack![Axis(0), x, y, z]
-}
+pub fn vangle<A>(u1: &Vector3Slice<A>, u2: &Vector3Slice<A>) -> Scalar
+where
+    A: Data<Elem = f64>,
+{
+    let (u1, u2) = sanitize_dims(u1, u2);
+    let (u1u, _) = unit(&u1); // unit vectors
+    let (u2u, _) = unit(&u2);
 
-pub fn vangle(u1: Vector3, u2: Vector3) -> Generic1D {
-    let (u1u, _) = unit(u1); // unit vectors
-    let (u2u, _) = unit(u2);
-    Generic1D::from_vec(
-        fdot(u1u, u2u)
+    Generic1D::from_iter(
+        sat(&fdot(&u1u, &u2u), (-1., 1.))
             .iter()
-            .map(|&v| sat(v, (-1., 1.)).acos())
-            .collect::<Vec<f64>>(),
+            .map(|dprod| dprod.acos()),
     )
 }
 
-pub fn radec2uvec(ra: Generic1D, dec: Generic1D) -> Vector3 {
+pub fn radec2uvec<A>(ra: GenericSlice1D<A>, dec: GenericSlice1D<A>) -> Vector3
+where
+    A: Data<Elem = f64>,
+{
     // Sanitize Dims
     let ra = Generic2D::from_shape_vec((1, ra.len()), ra.to_vec()).unwrap();
     let dec = Generic2D::from_shape_vec((1, dec.len()), dec.to_vec()).unwrap();
-    let (ra, dec) = sanitize_dims(ra, dec);
+    let (ra, dec) = sanitize_dims(&ra, &dec);
 
     let u1 = ra.cos() * dec.cos();
     let u2 = ra.sin() * dec.cos();
     let u3 = dec.sin();
 
     stack!(Axis(0), u1.row(0), u2.row(0), u3.row(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use ndarray::concatenate;
+
+    use super::*;
+
+    fn x(n: usize) -> Generic2D {
+        concatenate![Axis(0), Generic2D::ones((1, n)), Generic2D::zeros((2, n))]
+    }
+    fn y(n: usize) -> Generic2D {
+        concatenate![
+            Axis(0),
+            Generic2D::zeros((1, n)),
+            Generic2D::ones((1, n)),
+            Generic2D::zeros((1, n))
+        ]
+    }
+    fn z(n: usize) -> Generic2D {
+        concatenate![Axis(0), Generic2D::zeros((2, n)), Generic2D::ones((1, n))]
+    }
+
+    #[test]
+    fn test_cross_xy() {
+        let ux = x(1);
+        let uy = y(1);
+        assert_eq!(fcross(&ux, &uy), z(1))
+    }
+
+    #[test]
+    fn test_cross_xz() {
+        let ux = x(1);
+        let uz = z(1);
+        assert_eq!(fcross(&ux, &uz), -1. * y(1))
+    }
+
+    #[test]
+    fn test_cross_yz() {
+        let uy = y(1);
+        let uz = z(1);
+        assert_eq!(fcross(&uy, &uz), &x(1))
+    }
+
+    #[test]
+    fn test_dot_xx() {
+        let u1 = x(1);
+        let u2 = x(1);
+        assert_eq!(fdot(&u1, &u2), Generic1D::from_vec(vec![1.]))
+    }
+
+    #[test]
+    fn test_dot_xy() {
+        let u1 = x(1);
+        let u2 = y(1);
+        assert_eq!(fdot(&u1, &u2), Generic1D::from_vec(vec![0.]))
+    }
 }
